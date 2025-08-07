@@ -21,15 +21,7 @@ async def validate_auth(hass, email, password, device_names, max_retries) -> Non
         device_names=device_names_,
         max_retries=max_retries,
     )
-    
-    try:
-        await hass.async_add_executor_job(api.login)
-    except RuntimeError as err:
-        # Check if we have any working devices despite the error
-        if hasattr(api, 'things') and api.things:
-            _LOGGER.warning(f"Login partially failed, but continuing with {len(api.things)} available devices")
-        else:
-            raise err
+    await hass.async_add_executor_job(api.login)
 
     hass.data[DOMAIN] = {API: api}
 
