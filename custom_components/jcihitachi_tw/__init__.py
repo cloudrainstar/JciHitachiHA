@@ -38,6 +38,10 @@ def build_coordinator(hass, api):
             # Note: asyncio.TimeoutError and aiohttp.ClientError are already
             # handled by the data update coordinator.
             async with async_timeout.timeout(timeout):
+                # Check if _aws_tokens is None before refreshing status
+                if api._aws_tokens is None:
+                    _LOGGER.debug("_aws_tokens is None before refresh_status")
+                
                 await hass.async_add_executor_job(api.refresh_status)
                 hass.data[DOMAIN][UPDATED_DATA] = api.get_status(legacy=True)
 
@@ -45,10 +49,18 @@ def build_coordinator(hass, api):
             raise UpdateFailed(f"Command executed timed out when regularly fetching data.")
 
         except Exception as err:
-            raise UpdateFailed(f"Error communicating with API: {err}")
+            # Log the error but try to continue with available devices
+            _LOGGER.warning(f"Error communicating with some devices: {err}")
+            # Try to get status of available devices only
+            try:
+                hass.data[DOMAIN][UPDATED_DATA] = api.get_status(legacy=True)
+                _LOGGER.debug("Successfully retrieved status for available devices despite error")
+            except Exception as status_err:
+                _LOGGER.error(f"Failed to get status for any devices: {status_err}")
+                raise UpdateFailed(f"Error communicating with API: {err}")
         
-        _LOGGER.debug(
-            f"Latest data: {[(name, value.status) for name, value in hass.data[DOMAIN][UPDATED_DATA].items()]}")
+        # _LOGGER.debug(
+        #     f"Latest data: {[(name, value.status) for name, value in hass.data[DOMAIN][UPDATED_DATA].items()]}")
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -92,12 +104,17 @@ async def async_setup(hass, config):
 
     try:
         await hass.async_add_executor_job(api.login)
+        _LOGGER.debug("Login successful, _aws_tokens is %s", "None" if api._aws_tokens is None else "set")
     except AssertionError as err:
-        _LOGGER.error(f"Assertion check error: {err}")
+        _LOGGER.error(f"Assertion check error: {err}", exc_info=True)
         return False
     except RuntimeError as err:
-        _LOGGER.error(f"Failed to login API: {err}")
-        return False
+        _LOGGER.error(f"Failed to login API: {err}", exc_info=True)
+        # Check if we have any working devices despite the error
+        if hasattr(api, 'things') and api.things:
+            _LOGGER.warning(f"Login partially failed, but continuing with {len(api.things)} available devices")
+        else:
+            return False
 
     _LOGGER.debug(f"Backend version: {__version__}")
     _LOGGER.debug(f"Thing info: {[thing for thing in api.things.values()]}")
@@ -142,18 +159,25 @@ async def async_setup_entry(hass, config_entry):
 
         try:
             await hass.async_add_executor_job(api.login)
+            _LOGGER.debug("Login successful, _aws_tokens is %s", "None" if api._aws_tokens is None else "set")
         except AssertionError as err:
-            _LOGGER.error(f"Assertion check error: {err}")
+            _LOGGER.error(f"Assertion check error: {err}", exc_info=True)
             return False
         except RuntimeError as err:
-            _LOGGER.error(f"Failed to login API: {err}")
-            return False
+            _LOGGER.error(f"Failed to login API: {err}", exc_info=True)
+            # Check if we have any working devices despite the error
+            if hasattr(api, 'things') and api.things:
+                _LOGGER.warning(f"Login partially failed, but continuing with {len(api.things)} available devices")
+            else:
+                return False
         
         hass.data[DOMAIN] = {}
         hass.data[DOMAIN][API] = api
     else:
         assert API in hass.data[DOMAIN], f"The storage for {DOMAIN} exists but the API instance does not."
         _LOGGER.debug("The API instance has been created in config flow, skipping login.")
+        api = hass.data[DOMAIN][API]
+        _LOGGER.debug("Existing API instance, _aws_tokens is %s", "None" if api._aws_tokens is None else "set")
 
     _LOGGER.debug(f"Backend version: {__version__}")
     _LOGGER.debug(f"Thing info: {[thing for thing in hass.data[DOMAIN][API].things.values()]}")
@@ -186,23 +210,42 @@ class JciHitachiEntity(CoordinatorEntity):
 
     @property
     def available(self) -> bool:
-        return self._thing.available
+        """Return device availability, handling cases where device may have failed during initialization."""
+        try:
+            return self._thing.available
+        except (AttributeError, Exception) as err:
+            _LOGGER.debug(f"Device {getattr(self._thing, 'name', 'unknown')} availability check failed: {err}")
+            return False
 
     @property
     def device_info(self) -> dict:
         """Return device info of the entity."""
-        return {
-            "identifiers": {(DOMAIN, self._thing.gateway_mac_address)},
-            "name": self._thing.name,
-            "manufacturer": self._thing.brand,
-            "model": self._thing.model,
-            "sw_version": self._thing.firmware_version,
-        }
+        try:
+            return {
+                "identifiers": {(DOMAIN, self._thing.gateway_mac_address)},
+                "name": self._thing.name,
+                "manufacturer": self._thing.brand,
+                "model": self._thing.model,
+                "sw_version": self._thing.firmware_version,
+            }
+        except (AttributeError, Exception) as err:
+            _LOGGER.debug(f"Device info retrieval failed for {getattr(self._thing, 'name', 'unknown')}: {err}")
+            # Return minimal device info
+            return {
+                "identifiers": {(DOMAIN, getattr(self._thing, 'gateway_mac_address', 'unknown'))},
+                "name": getattr(self._thing, 'name', 'Unknown Device'),
+                "manufacturer": "JciHitachi",
+                "model": "Unknown",
+                "sw_version": "Unknown",
+            }
 
     @property
     def name(self):
         """Return the thing's name."""
-        return self._thing.name
+        try:
+            return self._thing.name
+        except (AttributeError, Exception):
+            return "Unknown Device"
 
     @property
     def unique_id(self):
@@ -223,22 +266,47 @@ class JciHitachiEntity(CoordinatorEntity):
     def update(self):
         """Update latest status."""
         api = self.hass.data[DOMAIN][API]
+        
+        # Check if _aws_tokens is None before processing queue
+        if api._aws_tokens is None:
+            _LOGGER.debug("_aws_tokens is None before processing update queue")
 
         while self.hass.data[DOMAIN][UPDATE_DATA].qsize() > 0:
             data = self.hass.data[DOMAIN][UPDATE_DATA].get()
             _LOGGER.debug(f"Updating data: {data}")
-            result = api.set_status(**vars(data))
-            if result is True:
-                _LOGGER.debug(f"Data: {data} updated successfully.")
-            else:
-                _LOGGER.error("Failed to update data.")
+            try:
+                result = api.set_status(**vars(data))
+                if result is True:
+                    _LOGGER.debug(f"Data: {data} updated successfully.")
+                else:
+                    _LOGGER.error("Failed to update data.")
+            except AttributeError:
+                _LOGGER.warning("Possible token expiration. Attempting to log in again.")
+                try:
+                    self.hass.loop.run_until_complete(
+                        self.hass.async_add_executor_job(api.login)
+                    )
+                    _LOGGER.debug("Re-login successful, _aws_tokens is %s", "None" if api._aws_tokens is None else "set")
+                    # Retry the operation after login
+                    result = api.set_status(**vars(data))
+                    if result is True:
+                        _LOGGER.debug(f"Data: {data} updated successfully after re-login.")
+                    else:
+                        _LOGGER.error("Failed to update data after re-login.")
+                except Exception as login_err:
+                    _LOGGER.error(f"Failed to re-login: {login_err}", exc_info=True)
+            except Exception as err:
+                _LOGGER.error(f"Error during update: {err}, Data: {data}", exc_info=True)
 
         # Here we don't need to refresh status as it was refreshed by `api.set_status`.
-        self.hass.data[DOMAIN][UPDATED_DATA] = api.get_status(legacy=True)
+        try:
+            self.hass.data[DOMAIN][UPDATED_DATA] = api.get_status(legacy=True)
+        except Exception as err:
+            _LOGGER.warning(f"Failed to get status during update, keeping previous data: {err}")
         
-        _LOGGER.debug(
-            f"Latest data: {[(name, value.status) for name, value in self.hass.data[DOMAIN][UPDATED_DATA].items()]}"
-        )
+        # _LOGGER.debug(
+        #     f"Latest data: {[(name, value.status) for name, value in self.hass.data[DOMAIN][UPDATED_DATA].items()]}"
+        # )
         
         # Important: We have to reset the update scheduler to prevent old status from wrongly being loaded. 
         self.hass.loop.call_soon_threadsafe(self.coordinator.async_set_updated_data, None)
