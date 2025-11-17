@@ -4,6 +4,7 @@
 
 |Name|Time|Amount|
 |----|----|------|
+| Hitachi Dev | Jul 26, 2025 19:41 PDT | 300 NTD |
 | HAO | Mar 22, 2025 20:37 PDT | 500 NTD |
 | pdclab.eth | Apr 19, 2024 14:04 | 100 NTD |
 | Edwin | Jan 18, 2024 18:44 | 888 NTD |
