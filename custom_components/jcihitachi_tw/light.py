@@ -1,7 +1,7 @@
 import logging
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
-    SUPPORT_BRIGHTNESS,
+    ColorMode,
     LightEntity,
 )
 
@@ -50,8 +50,12 @@ class JciHitachiDehumidifierLightEntity(JciHitachiEntity, LightEntity):
         return f"{self._thing.name} panel LED"
 
     @property
-    def supported_features(self):
-        return SUPPORT_BRIGHTNESS
+    def supported_color_modes(self):
+        return {ColorMode.BRIGHTNESS}
+
+    @property
+    def color_mode(self):
+        return ColorMode.BRIGHTNESS
 
     @property
     def is_on(self):
